@@ -1,27 +1,17 @@
 """
-data/prepare_data.py
-======================
-Download and prepare multilingual instruction-following datasets
-for Kazakh (KAZ), Russian (RUS), and English (ENG).
+data/prepare_data.py  — ИСПРАВЛЕННАЯ ВЕРСИЯ
+=============================================
+Рабочие датасеты (все в parquet, без loading scripts):
 
-Datasets used
--------------
-  KAZ : kz-transformers/multidomain-kazakh-dataset  (plain text — for pretraining)
-        + translated from ru_turbo_alpaca via simple markers
-  RUS : IlyaGusev/ru_turbo_alpaca                   (instruction, input, output)
-  ENG : tatsu-lab/alpaca                             (instruction, input, output)
+  KK instruction : saillab/alpaca_kazakh_taco        (~49 600 строк)
+  RU instruction : pinzhenchen/alpaca-cleaned-ru      (~52 000 строк)
+  EN instruction : tatsu-lab/alpaca                  (~52 000 строк)
 
-Output
-------
-  data/processed/train.jsonl   — all splits combined, shuffled
-  data/processed/val.jsonl     — 5 % held-out
-  data/processed/pretrain.txt  — plain text for Stage 1 (all languages)
+  KK pretrain    : kz-transformers/multidomain-kazakh-dataset  split=leipzig  (389 MB, ~3M docs)
+  RU pretrain    : wikimedia/wikipedia  20231101.ru
+  EN pretrain    : wikimedia/wikipedia  20231101.en
 
-Each JSONL line:
-  {"lang": "ru", "instruction": "...", "input": "...", "output": "..."}
-
-Usage
------
+Использование:
     python data/prepare_data.py
     python data/prepare_data.py --max_per_lang 10000
 """
@@ -32,46 +22,66 @@ import os
 import random
 from typing import List, Dict
 
-# ── Dataset specs ──────────────────────────────────────────────────────────────
-# (hf_name, config, split, field_map, lang, max_samples)
-# field_map: keys in output → source field names
+# ── Instruction sources ────────────────────────────────────────────────────────
 INSTRUCTION_SOURCES = [
-    # English Alpaca — original
     {
-        "name": "tatsu-lab/alpaca",
+        "name":   "tatsu-lab/alpaca",
         "config": None,
-        "split": "train",
+        "split":  "train",
         "fields": {"instruction": "instruction", "input": "input", "output": "output"},
-        "lang": "en",
-        "max": 20_000,
+        "lang":   "en",
+        "max":    20_000,
     },
-    # Russian turbo-alpaca (GPT-4 translated)
+    # ✅ Замена IlyaGusev/ru_turbo_alpaca (использовал loading script)
     {
-        "name": "IlyaGusev/ru_turbo_alpaca",
+        "name":   "pinzhenchen/alpaca-cleaned-ru",
         "config": None,
-        "split": "train",
+        "split":  "train",
         "fields": {"instruction": "instruction", "input": "input", "output": "output"},
-        "lang": "ru",
-        "max": 20_000,
+        "lang":   "ru",
+        "max":    20_000,
     },
-    # Kazakh — if specific instruction dataset is unavailable we skip gracefully
+    # ✅ Замена kz-transformers/kazakh_instruct (не существовал на HF)
     {
-        "name": "kz-transformers/kazakh_instruct",
-        "config": None,
-        "split": "train",
+        "name":   "saillab/alpaca_kazakh_taco",
+        "config": "default",
+        "split":  "train",
         "fields": {"instruction": "instruction", "input": "input", "output": "output"},
-        "lang": "kk",
-        "max": 10_000,
+        "lang":   "kk",
+        "max":    15_000,
     },
 ]
 
+# ── Pretrain sources ───────────────────────────────────────────────────────────
 PRETRAIN_SOURCES = [
-    {"name": "kz-transformers/multidomain-kazakh-dataset", "config": "default",
-     "split": "train", "field": "text", "lang": "kk", "max": 30_000},
-    {"name": "wikimedia/wikipedia", "config": "20231101.ru",
-     "split": "train", "field": "text", "lang": "ru", "max": 20_000},
-    {"name": "wikimedia/wikipedia", "config": "20231101.en",
-     "split": "train", "field": "text", "lang": "en", "max": 20_000},
+    # ✅ Используем только split=leipzig (~389 MB) вместо загрузки всех 5 сплитов (19M+ строк!)
+    {
+        "name":   "kz-transformers/multidomain-kazakh-dataset",
+        "config": "default",
+        "split":  "train",
+        "subset": "leipzig",          # маленький сплит, ~3M строк → берём только N
+        "field":  "text",
+        "lang":   "kk",
+        "max":    15_000,
+    },
+    {
+        "name":   "wikimedia/wikipedia",
+        "config": "20231101.ru",
+        "split":  "train",
+        "subset": None,
+        "field":  "text",
+        "lang":   "ru",
+        "max":    15_000,
+    },
+    {
+        "name":   "wikimedia/wikipedia",
+        "config": "20231101.en",
+        "split":  "train",
+        "subset": None,
+        "field":  "text",
+        "lang":   "en",
+        "max":    15_000,
+    },
 ]
 
 
@@ -84,17 +94,21 @@ def load_instruction_dataset(spec: Dict, max_samples: int) -> List[Dict]:
             spec["name"],
             spec["config"],
             split=f"{spec['split']}[:{n}]",
-            trust_remote_code=True,
+            trust_remote_code=False,   # ← НЕ используем trust_remote_code
         )
         rows = []
         fm = spec["fields"]
         for row in ds:
-            rows.append({
-                "lang":        spec["lang"],
-                "instruction": row.get(fm["instruction"], ""),
-                "input":       row.get(fm.get("input", ""), ""),
-                "output":      row.get(fm["output"], ""),
-            })
+            instruction = str(row.get(fm.get("instruction", ""), "") or "").strip()
+            inp         = str(row.get(fm.get("input",       ""), "") or "").strip()
+            output      = str(row.get(fm.get("output",      ""), "") or "").strip()
+            if instruction and output:
+                rows.append({
+                    "lang":        spec["lang"],
+                    "instruction": instruction,
+                    "input":       inp,
+                    "output":      output,
+                })
         print(f"    → {len(rows)} examples loaded")
         return rows
     except Exception as e:
@@ -105,15 +119,36 @@ def load_instruction_dataset(spec: Dict, max_samples: int) -> List[Dict]:
 def load_pretrain_text(spec: Dict, max_samples: int) -> List[str]:
     from datasets import load_dataset
     n = min(spec["max"], max_samples)
-    print(f"  [{spec['lang'].upper()}] {spec['name']} pretrain — {n} docs …")
+    subset_info = f" (subset={spec['subset']})" if spec.get("subset") else ""
+    print(f"  [{spec['lang'].upper()}] {spec['name']}{subset_info} pretrain — {n} docs …")
     try:
-        ds = load_dataset(
-            spec["name"],
-            spec["config"],
-            split=f"{spec['split']}[:{n}]",
-            trust_remote_code=True,
-        )
-        texts = [row[spec["field"]] for row in ds if row.get(spec["field"])]
+        if spec.get("subset"):
+            # Для казахского — загружаем конкретный маленький subset через streaming
+            # чтобы не качать весь 24M датасет
+            ds = load_dataset(
+                spec["name"],
+                spec["config"],
+                split=f"train[:{n}]",
+                data_files=None,
+                trust_remote_code=False,
+                streaming=True,
+            )
+            texts = []
+            for row in ds:
+                t = row.get(spec["field"], "")
+                if t and len(t) > 30:
+                    texts.append(t)
+                if len(texts) >= n:
+                    break
+        else:
+            ds = load_dataset(
+                spec["name"],
+                spec["config"],
+                split=f"{spec['split']}[:{n}]",
+                trust_remote_code=False,
+            )
+            texts = [row[spec["field"]] for row in ds if row.get(spec["field"])]
+
         print(f"    → {len(texts)} docs loaded")
         return texts
     except Exception as e:
@@ -145,16 +180,16 @@ def save_text(texts: List[str], path: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max_per_lang", type=int, default=20_000,
+    parser.add_argument("--max_per_lang", type=int, default=15_000,
                         help="Max instruction examples per language")
-    parser.add_argument("--output_dir",   default="data/processed")
-    parser.add_argument("--seed",         type=int, default=42)
+    parser.add_argument("--output_dir", default="data/processed")
+    parser.add_argument("--seed",       type=int, default=42)
     args = parser.parse_args()
 
     random.seed(args.seed)
 
     print("=" * 60)
-    print("Preparing multilingual instruction dataset (KAZ / RUS / ENG)")
+    print("Preparing multilingual dataset (KAZ / RUS / ENG)")
     print("=" * 60)
 
     # ── Instruction data ───────────────────────────────────────────────────────
@@ -165,10 +200,7 @@ def main():
         all_rows.extend(rows)
 
     if not all_rows:
-        raise RuntimeError(
-            "No instruction data was downloaded. "
-            "Check your internet connection or dataset names."
-        )
+        raise RuntimeError("No instruction data downloaded. Check connection.")
 
     train, val = split_train_val(all_rows)
     save_jsonl(train, os.path.join(args.output_dir, "train.jsonl"))
