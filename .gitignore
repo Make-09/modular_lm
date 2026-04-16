@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pth
+*.pt
+checkpoints/
+data/raw/
+data/processed/
+tokenizer/*.model
+tokenizer/*.vocab
+*.log
+.env
+.DS_Store
